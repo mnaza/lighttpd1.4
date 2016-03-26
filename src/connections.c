@@ -119,6 +119,20 @@ static int connection_del(server *srv, connection *con) {
 }
 
 int connection_close(server *srv, connection *con) {
+	/* the plugins should cleanup themself */
+	for (i = 0; i < srv->plugins.used; i++) {
+		plugin *p = ((plugin **)(srv->plugins.ptr))[i];
+		plugin_data *pd = p->data;
+
+		if (!pd) continue;
+
+		if (con->plugin_ctx[pd->id] != NULL) {
+			log_error_write(srv, __FILE__, __LINE__, "sb", "missing cleanup in", p->name);
+		}
+
+		con->plugin_ctx[pd->id] = NULL;
+	}
+
 #ifdef USE_OPENSSL
 	server_socket *srv_sock = con->srv_socket;
 #endif
@@ -856,19 +870,6 @@ int connection_reset(server *srv, connection *con) {
 	chunkqueue_reset(con->write_queue);
 	chunkqueue_reset(con->request_content_queue);
 
-	/* the plugins should cleanup themself */
-	for (i = 0; i < srv->plugins.used; i++) {
-		plugin *p = ((plugin **)(srv->plugins.ptr))[i];
-		plugin_data *pd = p->data;
-
-		if (!pd) continue;
-
-		if (con->plugin_ctx[pd->id] != NULL) {
-			log_error_write(srv, __FILE__, __LINE__, "sb", "missing cleanup in", p->name);
-		}
-
-		con->plugin_ctx[pd->id] = NULL;
-	}
 
 	/* The cond_cache gets reset in response.c */
 	/* config_cond_cache_reset(srv, con); */

@@ -110,6 +110,7 @@ static int config_insert(server *srv) {
 		{ "ssl.honor-cipher-order",            NULL, T_CONFIG_BOOLEAN, T_CONFIG_SCOPE_CONNECTION }, /* 66 */
 		{ "ssl.empty-fragments",               NULL, T_CONFIG_BOOLEAN, T_CONFIG_SCOPE_CONNECTION }, /* 67 */
 		{ "server.upload-temp-file-size",      NULL, T_CONFIG_INT,     T_CONFIG_SCOPE_SERVER     }, /* 68 */
+		{ "mimetype.xattr-name",               NULL, T_CONFIG_STRING,  T_CONFIG_SCOPE_SERVER     }, /* 69 */
 
 		{ "server.host",
 			"use server.bind instead",
@@ -173,6 +174,7 @@ static int config_insert(server *srv) {
 	cv[55].destination = srv->srvconf.breakagelog_file;
 
 	cv[68].destination = &(srv->srvconf.upload_temp_file_size);
+	cv[69].destination = srv->srvconf.xattr_name;
 
 	srv->config_storage = calloc(1, srv->config_context->used * sizeof(specific_config *));
 
@@ -1177,6 +1179,10 @@ int config_read(server *srv, const char *fn) {
 	if (NULL != (modules = (data_array *)array_get_element(srv->config, "server.modules"))) {
 		data_string *ds;
 		data_array *prepends;
+		int prepend_mod_indexfile = 1;
+		int append_mod_dirlisting = 1;
+		int append_mod_staticfile = 1;
+		size_t i;
 
 		if (modules->type != TYPE_ARRAY) {
 			fprintf(stderr, "server.modules must be an array");
@@ -1186,7 +1192,29 @@ int config_read(server *srv, const char *fn) {
 		prepends = data_array_init();
 
 		/* prepend default modules */
-		if (NULL == array_get_element(modules->value, "mod_indexfile")) {
+		for (i = 0; i < modules->value->used; i++) {
+			ds = (data_string *)modules->value->data[i];
+
+			if (buffer_is_equal_string(ds->value, CONST_STR_LEN("mod_indexfile"))) {
+				prepend_mod_indexfile = 0;
+			}
+
+			if (buffer_is_equal_string(ds->value, CONST_STR_LEN("mod_staticfile"))) {
+				append_mod_staticfile = 0;
+			}
+
+			if (buffer_is_equal_string(ds->value, CONST_STR_LEN("mod_dirlisting"))) {
+				append_mod_dirlisting = 0;
+			}
+
+			if (0 == prepend_mod_indexfile &&
+			    0 == append_mod_dirlisting &&
+			    0 == append_mod_staticfile) {
+				break;
+			}
+		}
+
+		if (prepend_mod_indexfile) {
 			ds = data_string_init();
 			buffer_copy_string_len(ds->value, CONST_STR_LEN("mod_indexfile"));
 			array_insert_unique(prepends->value, (data_unset *)ds);
@@ -1199,13 +1227,13 @@ int config_read(server *srv, const char *fn) {
 		modules = prepends;
 
 		/* append default modules */
-		if (NULL == array_get_element(modules->value, "mod_dirlisting")) {
+		if (append_mod_dirlisting) {
 			ds = data_string_init();
 			buffer_copy_string_len(ds->value, CONST_STR_LEN("mod_dirlisting"));
 			array_insert_unique(modules->value, (data_unset *)ds);
 		}
 
-		if (NULL == array_get_element(modules->value, "mod_staticfile")) {
+		if (append_mod_staticfile) {
 			ds = data_string_init();
 			buffer_copy_string_len(ds->value, CONST_STR_LEN("mod_staticfile"));
 			array_insert_unique(modules->value, (data_unset *)ds);
@@ -1285,6 +1313,31 @@ int config_set_defaults(server *srv) {
 			log_error_write(srv, __FILE__, __LINE__, "sb",
 					"server.chroot isn't a directory:", srv->srvconf.changeroot);
 			return -1;
+		}
+	}
+
+	if (srv->srvconf.upload_tempdirs->used) {
+		buffer * const b = srv->tmp_buf;
+		size_t len;
+		if (!buffer_string_is_empty(srv->srvconf.changeroot)) {
+			buffer_copy_buffer(b, srv->srvconf.changeroot);
+			buffer_append_slash(b);
+		} else {
+			buffer_reset(b);
+		}
+		len = buffer_string_length(b);
+
+		for (i = 0; i < srv->srvconf.upload_tempdirs->used; ++i) {
+			const data_string * const ds = (data_string *)srv->srvconf.upload_tempdirs->data[i];
+			buffer_string_set_length(b, len); /*(truncate)*/
+			buffer_append_string_buffer(b, ds->value);
+			if (-1 == stat(b->ptr, &st1)) {
+				log_error_write(srv, __FILE__, __LINE__, "sb",
+					"server.upload-dirs doesn't exist:", b);
+			} else if (!S_ISDIR(st1.st_mode)) {
+				log_error_write(srv, __FILE__, __LINE__, "sb",
+					"server.upload-dirs isn't a directory:", b);
+			}
 		}
 	}
 

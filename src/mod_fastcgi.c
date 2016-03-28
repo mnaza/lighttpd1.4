@@ -2010,9 +2010,11 @@ static int fcgi_create_env(server *srv, handler_ctx *hctx, size_t request_id) {
 	}
 
 	s = get_http_method_name(con->request.http_method);
+	force_assert(s);
 	FCGI_ENV_ADD_CHECK(fcgi_env_add(p->fcgi_env, CONST_STR_LEN("REQUEST_METHOD"), s, strlen(s)),con)
 	FCGI_ENV_ADD_CHECK(fcgi_env_add(p->fcgi_env, CONST_STR_LEN("REDIRECT_STATUS"), CONST_STR_LEN("200")),con) /* if php is compiled with --force-redirect */
 	s = get_http_version_name(con->request.http_version);
+	force_assert(s);
 	FCGI_ENV_ADD_CHECK(fcgi_env_add(p->fcgi_env, CONST_STR_LEN("SERVER_PROTOCOL"), s, strlen(s)),con)
 
 	if (buffer_is_equal_caseless_string(con->uri.scheme, CONST_STR_LEN("https"))) {
@@ -2131,8 +2133,13 @@ static int fcgi_response_parse(server *srv, connection *con, plugin_data *p, buf
 			break;
 		case 6:
 			if (0 == strncasecmp(key, "Status", key_len)) {
-				con->http_status = strtol(value, NULL, 10);
-				con->parsed_response |= HTTP_STATUS;
+				int status = strtol(value, NULL, 10);
+				if (status >= 100 && status < 1000) {
+					con->http_status = status;
+					con->parsed_response |= HTTP_STATUS;
+				} else {
+					con->http_status = 502;
+				}
 			}
 			break;
 		case 8:
@@ -2234,7 +2241,7 @@ range_success: ;
 			break;
 		case 14:
 			if (0 == strncasecmp(key, "Content-Length", key_len)) {
-				con->response.content_length = strtol(value, NULL, 10);
+				con->response.content_length = strtoul(value, NULL, 10);
 				con->parsed_response |= HTTP_CONTENT_LENGTH;
 
 				if (con->response.content_length < 0) con->response.content_length = 0;

@@ -147,7 +147,9 @@ static void signal_handler(int sig) {
 #endif
 
 #ifdef HAVE_FORK
-static void daemonize(void) {
+static int daemonize(void) {
+	int pipefd[2];
+	pid_t pid;
 #ifdef SIGTTOU
 	signal(SIGTTOU, SIG_IGN);
 #endif
@@ -157,7 +159,32 @@ static void daemonize(void) {
 #ifdef SIGTSTP
 	signal(SIGTSTP, SIG_IGN);
 #endif
-	if (0 != fork()) exit(0);
+
+	if (pipe(pipefd) < 0) exit(-1);
+
+	if (0 > (pid = fork())) exit(-1);
+
+	if (0 < pid) {
+		char buf;
+		ssize_t bytes;
+
+		close(pipefd[1]);
+		/* parent waits for grandchild to be ready */
+		do {
+			bytes = read(pipefd[0], &buf, sizeof(buf));
+		} while (bytes < 0 && EINTR == errno);
+		close(pipefd[0]);
+
+		if (bytes <= 0) {
+			/* closed fd (without writing) == failure in grandchild */
+			fputs("daemonized server failed to start; check error log for details\n", stderr);
+			exit(-1);
+		}
+
+		exit(0);
+	}
+
+	close(pipefd[0]);
 
 	if (-1 == setsid()) exit(0);
 
@@ -166,6 +193,9 @@ static void daemonize(void) {
 	if (0 != fork()) exit(0);
 
 	if (0 != chdir("/")) exit(0);
+
+	fd_close_on_exec(pipefd[1]);
+	return pipefd[1];
 }
 #endif
 
@@ -245,6 +275,7 @@ static server *server_init(void) {
 	srv->srvconf.network_backend = buffer_init();
 	srv->srvconf.upload_tempdirs = array_init();
 	srv->srvconf.reject_expect_100_with_417 = 1;
+	srv->srvconf.xattr_name = buffer_init_string("Content-Type");
 
 	/* use syslog */
 	srv->errorlog_fd = STDERR_FILENO;
@@ -285,6 +316,7 @@ static void server_free(server *srv) {
 	CLEAN(srvconf.pid_file);
 	CLEAN(srvconf.modules_dir);
 	CLEAN(srvconf.network_backend);
+	CLEAN(srvconf.xattr_name);
 
 	CLEAN(tmp_chunk_len);
 #undef CLEAN
@@ -589,6 +621,10 @@ int main (int argc, char **argv) {
 	struct rlimit rlim;
 #endif
 
+#ifdef HAVE_FORK
+	int parent_pipe_fd = -1;
+#endif
+
 #ifdef USE_ALARM
 	struct itimerval interval;
 
@@ -597,7 +633,6 @@ int main (int argc, char **argv) {
 	interval.it_value.tv_sec = 1;
 	interval.it_value.tv_usec = 0;
 #endif
-
 
 	/* for nice %b handling in strfime() */
 	setlocale(LC_TIME, "C");
@@ -616,6 +651,7 @@ int main (int argc, char **argv) {
 	i_am_root = 0;
 #endif
 	srv->srvconf.dont_daemonize = 0;
+	srv->srvconf.preflight_check = 0;
 
 	while(-1 != (o = getopt(argc, argv, "f:m:hvVDpt"))) {
 		switch(o) {
@@ -636,7 +672,7 @@ int main (int argc, char **argv) {
 			buffer_copy_string(srv->srvconf.modules_dir, optarg);
 			break;
 		case 'p': print_config = 1; break;
-		case 't': test_config = 1; break;
+		case 't': ++test_config; break;
 		case 'D': srv->srvconf.dont_daemonize = 1; break;
 		case 'v': show_version(); return 0;
 		case 'V': show_features(); return 0;
@@ -668,7 +704,14 @@ int main (int argc, char **argv) {
 	}
 
 	if (test_config) {
-		printf("Syntax OK\n");
+		if (1 == test_config) {
+			printf("Syntax OK\n");
+		} else { /*(test_config > 1)*/
+			test_config = 0;
+			srv->srvconf.preflight_check = 1;
+			srv->srvconf.dont_daemonize = 1;
+			buffer_reset(srv->srvconf.pid_file);
+		}
 	}
 
 	if (test_config || print_config) {
@@ -982,7 +1025,9 @@ int main (int argc, char **argv) {
 
 #ifdef HAVE_FORK
 	/* network is up, let's deamonize ourself */
-	if (srv->srvconf.dont_daemonize == 0) daemonize();
+	if (srv->srvconf.dont_daemonize == 0) {
+		parent_pipe_fd = daemonize();
+	}
 #endif
 
 
@@ -1049,7 +1094,7 @@ int main (int argc, char **argv) {
 
 	/* Close stderr ASAP in the child process to make sure that nothing
 	 * is being written to that fd which may not be valid anymore. */
-	if (-1 == log_error_open(srv)) {
+	if (!srv->srvconf.preflight_check && -1 == log_error_open(srv)) {
 		log_error_write(srv, __FILE__, __LINE__, "s", "Opening errorlog failed. Going down.");
 
 		plugins_free(srv);
@@ -1108,8 +1153,26 @@ int main (int argc, char **argv) {
 		return -1;
 	}
 
+	if (srv->srvconf.preflight_check) {
+		/*printf("Preflight OK");*//*(stdout reopened to /dev/null)*/
+		plugins_free(srv);
+		network_close(srv);
+		server_free(srv);
+
+		exit(0);
+	}
+
 
 #ifdef HAVE_FORK
+	/**
+	 * notify daemonize-grandparent of successful startup
+	 * do this before any further forking is done (workers)
+	 */
+	if (srv->srvconf.dont_daemonize == 0) {
+		if (0 > write(parent_pipe_fd, "", 1)) return -1;
+		close(parent_pipe_fd);
+	}
+
 	/* start watcher and workers */
 	num_childs = srv->srvconf.max_worker;
 	if (num_childs > 0) {

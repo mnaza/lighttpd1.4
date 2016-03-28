@@ -532,18 +532,18 @@ static int proxy_response_parse(server *srv, connection *con, plugin_data *p, bu
 
 	UNUSED(srv);
 
-	/* \r\n -> \0\0 */
+	/* [\r]\n -> [\0]\0 */
 
 	buffer_copy_buffer(p->parse_response, in);
 
-	for (s = p->parse_response->ptr; NULL != (ns = strstr(s, "\r\n")); s = ns + 2) {
+	for (s = p->parse_response->ptr; NULL != (ns = strchr(s, '\n')); s = ns + 1) {
 		char *key, *value;
 		int key_len;
 		data_string *ds;
 		int copy_header;
 
 		ns[0] = '\0';
-		ns[1] = '\0';
+		if (s != ns && ns[-1] == '\r') ns[-1] = '\0';
 
 		if (-1 == http_response_status) {
 			/* The first line of a Response message is the Status-Line */
@@ -552,7 +552,7 @@ static int proxy_response_parse(server *srv, connection *con, plugin_data *p, bu
 
 			if (*key) {
 				http_response_status = (int) strtol(key, NULL, 10);
-				if (http_response_status <= 0) http_response_status = 502;
+				if (http_response_status < 100 || http_response_status >= 1000) http_response_status = 502;
 			} else {
 				http_response_status = 502;
 			}
@@ -595,7 +595,7 @@ static int proxy_response_parse(server *srv, connection *con, plugin_data *p, bu
 			break;
 		case 14:
 			if (0 == strncasecmp(key, "Content-Length", key_len)) {
-				con->response.content_length = strtol(value, NULL, 10);
+				con->response.content_length = strtoul(value, NULL, 10);
 				con->parsed_response |= HTTP_CONTENT_LENGTH;
 			}
 			break;

@@ -510,6 +510,7 @@ typedef struct {
 	buffer *breakagelog_file;
 
 	unsigned short dont_daemonize;
+	unsigned short preflight_check;
 	buffer *changeroot;
 	buffer *username;
 	buffer *groupname;
@@ -541,6 +542,7 @@ typedef struct {
 	} stat_cache_engine;
 	unsigned short enable_cores;
 	unsigned short reject_expect_100_with_417;
+	buffer *xattr_name;
 } server_config;
 
 typedef struct server_socket {
